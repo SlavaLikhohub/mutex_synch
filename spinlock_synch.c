@@ -21,10 +21,18 @@ MODULE_LICENSE("GPL");
 static u32 N_thr = 5;
 module_param(N_thr, int, 0444);
 
+enum thread_status_enum {
+	THREAD_INIT = 0,
+	THREAD_RUNNING,
+	THREAD_STOPPED,
+};
+
 struct thread_node
 {
 	struct list_head node;
 	struct task_struct* thread;
+	u32 num;
+	u8 status;
 };
 
 static LIST_HEAD(threads_list);
@@ -34,28 +42,19 @@ static struct thread_node * kthread_arr;
 static u64 global_var = 0;
 static DEFINE_MUTEX(gl_var_mutex);
 
-
-/* Array to save if thread has finished */
-static u8 *threads_status;
-
 int thread_func(void *data)
 {
-	int i;
-	int N = 10;
-	u32 thr_num = (typeof(N))data;
+	s32 i;
 	struct task_struct* cur = current;
-
-	if (thr_num < N)
-		N = thr_num;
+	struct thread_node *self_node = data;
+	char * name = cur->comm;
 
 	msleep(10);
 
-	char * name = cur->comm;
 
-	for (i = 0; i < N; i++) {
-		pr_debug(	"%s, GV: %llu\n",
-				name,
-				(unsigned long long) global_var);
+	for (i = 0; i < self_node->num; i++) {
+		pr_debug("%s, GV: %llu\n", name,
+			 (unsigned long long) global_var);
 
 		mutex_lock(&gl_var_mutex);
 		WRITE_ONCE(global_var, READ_ONCE(global_var) + 1);
@@ -67,11 +66,11 @@ int thread_func(void *data)
 		msleep(1000);
 	}
 
-	threads_status[thr_num] = 1;
+	self_node->status = THREAD_STOPPED;
 	return 0;
 }
 
-static int init_thread_list(s32 N)
+static int __init init_thread_list(s32 N)
 {
 	typeof(N) i;
 
@@ -81,15 +80,15 @@ static int init_thread_list(s32 N)
 		return -ENOMEM;
 
 	for (i = 0; i < N; i++) {
-		list_add(&kthread_arr[i].node, &threads_list);
-
-		kthread_arr[i].thread = kthread_create(	&thread_func,
-							(void *) i,
-							"Thread %lu",
-							(unsigned long)i);
-
+		kthread_arr[i].thread = kthread_create(&thread_func,
+						       &kthread_arr[i],
+						       "Thread %d", (int)i);
 		if (unlikely(IS_ERR(kthread_arr[i].thread)))
 			goto err_kthread_create;
+
+		list_add(&kthread_arr[i].node, &threads_list);
+		kthread_arr[i].num = i;
+		kthread_arr[i].status = THREAD_INIT;
 	}
 
 	return 0;
@@ -104,15 +103,10 @@ err_kthread_create:
 	return -ENOMEM;
 }
 
-
-static int __init mut_syn_init(void)
+static int __init mutex_synchronization_init(void)
 {
 	int rc;
-	struct thread_node *node;
-
-	threads_status = kzalloc(sizeof(*threads_status) * N_thr, GFP_KERNEL);
-	if (unlikely(!threads_status))
-		return -ENOMEM;
+	struct thread_node *node_i;
 
 	/* Init threads */
 	rc = init_thread_list(N_thr);
@@ -121,29 +115,27 @@ static int __init mut_syn_init(void)
 
 
 	/* Run threads */
-	list_for_each_entry(node, &threads_list, node) {
-		wake_up_process(node->thread);
+	list_for_each_entry(node_i, &threads_list, node) {
+		node_i->status = THREAD_RUNNING;
+		wake_up_process(node_i->thread);
 	}
 
 	return 0;
 
 err_init_thread:
-	kfree(threads_status);
 	return rc;
 }
 
-static void __exit mut_syn_exit(void)
+static void __exit mutex_synchronization_exit(void)
 {
-	struct thread_node *node;
-	int i = 0;
+	struct thread_node *node_i;
 
-	list_for_each_entry_reverse(node, &threads_list, node) {
-		if (threads_status[i++] == 0)
-			kthread_stop(node->thread);
+	list_for_each_entry_reverse(node_i, &threads_list, node) {
+		if (node_i->status == 0)
+			kthread_stop(node_i->thread);
 	}
 	pr_debug("Finished\n");
-	kfree(kthread_arr);
 }
 
-module_init(mut_syn_init);
-module_exit(mut_syn_exit);
+module_init(mutex_synchronization_init);
+module_exit(mutex_synchronization_exit);
